@@ -1,2 +1,2 @@
 # GBAx
-GBAx is an open source console-like GBA emulator and launcher based on mGBA.
+GBAx is an open source GBA emulator with a built-in game launcher based on mGBA. -- Built with QT
