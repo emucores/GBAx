@@ -293,6 +293,8 @@ private:
 	std::shared_ptr<CoreController> m_cleanupController;
 	QTimer* m_controllerComboHoldTimer = nullptr;
 	QWidget* m_testOverlay = nullptr;
+	int m_quickStateSlot = 1;
+	QString m_lastStateAction;
 	bool m_overlayWasPaused = false;
 	bool m_controllerSelectDown = false;
 	bool m_controllerStartDown = false;

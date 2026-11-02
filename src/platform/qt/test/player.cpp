@@ -16,6 +16,8 @@
 #include <gbax/internal/gba/input.h>
 
 #include <QDialog>
+#include <QInputDialog>
+#include <QComboBox>
 #include <QCheckBox>
 #include <QCryptographicHash>
 #include <QStandardPaths>
@@ -200,6 +202,17 @@ private slots:
 				QSignalSpy loaded(core, &CoreController::stateLoaded);
 				core->loadState(statePath);
 				QTRY_COMPARE(loaded.count(), 1);
+                QSignalSpy operations(core, &CoreController::stateOperationFinished);
+                core->saveState(9);
+                QTRY_COMPARE(operations.count(), 1);
+                QCOMPARE(operations.at(0).at(0).toBool(), true);
+                QCOMPARE(operations.at(0).at(1).toInt(), 9);
+                QCOMPARE(operations.at(0).at(2).toBool(), true);
+                core->loadState(9);
+                QTRY_COMPARE(operations.count(), 2);
+                QCOMPARE(operations.at(1).at(0).toBool(), false);
+                QCOMPARE(operations.at(1).at(1).toInt(), 9);
+                QCOMPARE(operations.at(1).at(2).toBool(), true);
 			}
 			window->showMaximized();
 			QTRY_VERIFY(window->isMaximized());
@@ -227,6 +240,24 @@ private slots:
 				int selected = -1;
 				for (int i = 0; i < buttons.size(); ++i) if (buttons[i]->property("selected").toBool()) selected = i;
 				QVERIFY(selected >= 0);
+                QCOMPARE(buttons.size(), 9);
+                QVERIFY(overlay->width() <= window->width());
+                if (run == 0 && !initiallyPaused) {
+                    QTimer::singleShot(50, window, [window]() {
+                        auto* chooser = qobject_cast<QInputDialog*>(QApplication::activeModalWidget());
+                        QVERIFY(chooser);
+                        auto* combo = chooser->findChild<QComboBox*>();
+                        QVERIFY(combo);
+                        QCOMPARE(combo->count(), 9);
+                        QVERIFY(combo->itemText(8).startsWith("Slot 9"));
+                        QVERIFY(!combo->itemText(8).contains("Empty"));
+                        combo->setCurrentIndex(8);
+                        chooser->accept();
+                    });
+                    buttons[6]->click();
+                    QVERIFY(buttons[1]->text().contains("Slot 9"));
+                    QVERIFY(buttons[2]->text().contains("Slot 9"));
+                }
 				GamepadHatEvent down(GamepadHatEvent::Down(), 0, GamepadHatEvent::DOWN, 1234, window->inputController());
 				QApplication::sendEvent(window, &down);
 				QVERIFY(buttons[(selected + 1) % buttons.size()]->property("selected").toBool());

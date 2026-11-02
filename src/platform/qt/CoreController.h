@@ -231,6 +231,7 @@ signals:
 	void frameAvailable();
 	void didReset();
 	void stateLoaded();
+	void stateOperationFinished(bool saving, int slot, bool success);
 	void rewound();
 
 	void rewindChanged(bool);

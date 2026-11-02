@@ -170,3 +170,16 @@ jobs:
           version="$(python3 tools/release/release.py version)"
           gh release create "v$version" --draft --target "$GITHUB_SHA" \
             --title "GBAx $version" --notes-file tools/release/RELEASE_TEMPLATE.md dist/*
+
+      - name: Publish authorized Preview 2 after all build and package checks
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag=v2.0.0-preview.2
+          if gh release view "$tag" >/dev/null 2>&1; then
+            echo "Preview 2 already exists; leaving its assets unchanged."
+            exit 0
+          fi
+          gh release create "$tag" --prerelease --target "$GITHUB_SHA" \
+            --title "GBAx 2.0.0 Preview 2" --notes-file tools/release/PREVIEW_2.md dist/*

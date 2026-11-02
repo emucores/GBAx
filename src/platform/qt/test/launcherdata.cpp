@@ -9,6 +9,19 @@
 class LauncherDataTest : public QObject {
 Q_OBJECT
 private slots:
+ void atomicWriteAndFailure() {
+  QTemporaryDir dir;
+  const QString path = dir.filePath("metadata.json");
+  QVERIFY(QGBA::writeLauncherData(path, "old"));
+  { QSaveFile interrupted(path); QVERIFY(interrupted.open(QIODevice::WriteOnly)); interrupted.write("partial"); interrupted.cancelWriting(); }
+  QFile read(path); QVERIFY(read.open(QIODevice::ReadOnly)); QCOMPARE(read.readAll(), QByteArray("old")); read.close();
+  QVERIFY(QGBA::writeLauncherData(path, "new"));
+  QVERIFY(read.open(QIODevice::ReadOnly)); QCOMPARE(read.readAll(), QByteArray("new"));
+  QVERIFY(QDir().mkpath(dir.filePath("directory")));
+  QVERIFY(!QGBA::writeLauncherData(dir.filePath("directory"), "bad"));
+  QVERIFY(!QGBA::writeLauncherData(QString(), "bad"));
+ }
+
 	void resetPreservesPortableFiles() {
 		QTemporaryDir dir;
 		QVERIFY(dir.isValid());

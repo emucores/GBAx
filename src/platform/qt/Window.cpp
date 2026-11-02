@@ -8,6 +8,14 @@
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 #include "Window.h"
 #include "LauncherIpc.h"
+#include "Diagnostics.h"
+#include <QScrollArea>
+#include <QInputDialog>
+#include <QComboBox>
+#include <QDesktopServices>
+#include <QLocale>
+#include <gbax/core/serialize.h>
+#include <gbax-util/memory.h>
 
 #include <QCoreApplication>
 #include <QFileInfo>
@@ -239,9 +247,9 @@ public:
 		m_title->setObjectName(QStringLiteral("quickMenuTitle"));
 		m_subtitle->setObjectName(QStringLiteral("quickMenuSubtitle"));
 		m_hint->setObjectName(QStringLiteral("quickMenuHint"));
-		m_subtitle->setWordWrap(false);
+		m_subtitle->setWordWrap(true);
 		m_subtitle->setAlignment(Qt::AlignCenter);
-		m_subtitle->setFixedWidth(460);
+		m_subtitle->setMinimumWidth(0);
 		m_subtitle->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Preferred);
 		m_hint->setAlignment(Qt::AlignCenter);
 
@@ -255,9 +263,15 @@ public:
 		root->addStretch();
 		auto* center = new QHBoxLayout();
 		center->addStretch();
-		center->addWidget(m_panel);
+		m_scroll = new QScrollArea(this);
+        m_scroll->setWidgetResizable(true);
+        m_scroll->setFrameShape(QFrame::NoFrame);
+        m_scroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+        m_scroll->setMaximumWidth(600);
+        m_scroll->setWidget(m_panel);
+        center->addWidget(m_scroll, 1);
 		center->addStretch();
-		root->addLayout(center);
+		root->addLayout(center, 8);
 		root->addStretch();
 
 		auto* panelLayout = new QVBoxLayout(m_panel);
@@ -276,13 +290,16 @@ public:
 			tr("Load State"),
 			tr("Toggle Fullscreen"),
 			tr("Settings"),
-			tr("Exit to Launcher")
+			tr("Exit to Launcher"),
+            tr("Choose Save Slot"),
+            tr("Save Information"),
+            tr("Copy Diagnostics")
 		};
 		for (int i = 0; i < labels.size(); ++i) {
 			auto* button = new QPushButton(labels.at(i), m_panel);
 			button->setCursor(Qt::PointingHandCursor);
 			button->setProperty("selected", false);
-			button->setProperty("danger", i >= 5);
+			button->setProperty("danger", i == 5);
 			connect(button, &QPushButton::clicked, this, [this, i]() {
 				if (m_handler) {
 					m_handler(i);
@@ -293,18 +310,19 @@ public:
 		}
 		panelLayout->addSpacing(2);
 		panelLayout->addWidget(m_hint);
-		m_panel->setFixedWidth(560);
-		m_panel->setMinimumHeight(420);
+		m_panel->setMinimumWidth(0);
+		m_panel->setMinimumHeight(0);
 		updateSelection();
 	}
 
 	void setSubtitleText(const QString& text) {
 		QString clean = text.simplified();
-		clean = m_subtitle->fontMetrics().elidedText(clean, Qt::ElideRight, 460);
+		clean = m_subtitle->fontMetrics().elidedText(clean, Qt::ElideRight, qMax(120, width() - 80));
 		m_subtitle->setText(clean);
 		m_panel->adjustSize();
 	}
-	void setActionHandler(std::function<void(int)> handler) { m_handler = std::move(handler); }
+	void setActionText(int index, const QString& text) { if (index >= 0 && index < m_buttons.size()) m_buttons[index]->setText(text); }
+    void setActionHandler(std::function<void(int)> handler) { m_handler = std::move(handler); }
 	void moveSelection(int delta) {
 		if (m_buttons.isEmpty()) return;
 		m_selected = (m_selected + delta + m_buttons.size()) % m_buttons.size();
@@ -358,10 +376,11 @@ private:
 			button->setProperty("selected", selected);
 			button->style()->unpolish(button);
 			button->style()->polish(button);
-			if (selected) button->setFocus();
+			if (selected) { button->setFocus(); if (m_scroll) m_scroll->ensureWidgetVisible(button); }
 		}
 	}
 
+	QScrollArea* m_scroll = nullptr;
 	QFrame* m_panel;
 	QLabel* m_title;
 	QLabel* m_subtitle;
@@ -599,6 +618,23 @@ bool Window::event(QEvent* event) {
 }
 
 bool Window::eventFilter(QObject* watched, QEvent* event) {
+ if (auto* chooser = qobject_cast<QInputDialog*>(QApplication::activeModalWidget())) {
+  if (chooser->property("gbaxSaveSlotChooser").toBool()) {
+   int key = -1;
+   bool gamepad = false;
+   if (event->type() == GamepadButtonEvent::Down()) { key = static_cast<GamepadButtonEvent*>(event)->platformKey(); gamepad = true; }
+   else if (event->type() == GamepadAxisEvent::Type()) { auto* axis = static_cast<GamepadAxisEvent*>(event); if (axis->isNew()) key = axis->platformKey(); gamepad = true; }
+   else if (event->type() == GamepadHatEvent::Down()) { const int keys = static_cast<GamepadHatEvent*>(event)->platformKeys(); key = keys & (1 << GBA_KEY_UP) ? GBA_KEY_UP : (keys & (1 << GBA_KEY_DOWN) ? GBA_KEY_DOWN : -1); gamepad = true; }
+   else if (event->type() == GamepadButtonEvent::Up()) gamepad = true;
+   if (gamepad) {
+    if (key == GBA_KEY_A || key == GBA_KEY_START) chooser->accept();
+    else if (key == GBA_KEY_B) chooser->reject();
+    else if (auto* combo = chooser->findChild<QComboBox*>()) { if (key == GBA_KEY_UP || key == GBA_KEY_DOWN) combo->setCurrentIndex((combo->currentIndex() + (key == GBA_KEY_UP ? 8 : 1)) % 9); }
+    event->accept(); return true;
+   }
+  }
+ }
+
 	QWidget* watchedWidget = qobject_cast<QWidget*>(watched);
 	const bool belongsToWindow = watched == this || (watchedWidget && (watchedWidget == this || isAncestorOf(watchedWidget)));
 	if (!belongsToWindow) {
@@ -1229,6 +1265,27 @@ void Window::scriptingOpen() {
 #endif
 
 
+static QString quickSlotSummary(CoreController* controller, int slot) {
+ CoreController::Interrupter interrupt(controller);
+ auto* core = controller->thread()->core;
+ VFile* file = mCoreGetState(core, slot, false);
+ if (!file) return QObject::tr("Slot %1 — Empty").arg(slot);
+ mStateExtdata extdata;
+ mStateExtdataInit(&extdata);
+ void* state = mCoreExtractState(core, file, &extdata);
+ QString detail = state ? QObject::tr("Saved (date unavailable)") : QObject::tr("Unreadable state");
+ mStateExtdataItem item;
+ if (state && mStateExtdataGet(&extdata, EXTDATA_META_TIME, &item) && item.size == sizeof(uint64_t)) {
+  uint64_t microseconds;
+  LOAD_64LE(microseconds, 0, item.data);
+  detail = QLocale().toString(QDateTime::fromMSecsSinceEpoch(microseconds / 1000LL), QLocale::ShortFormat);
+ }
+ file->close(file);
+ if (state) mappedMemoryFree(state, core->stateSize(core));
+ mStateExtdataDeinit(&extdata);
+ return QObject::tr("Slot %1 — %2").arg(slot).arg(detail);
+}
+
 void Window::ensureTestOverlay() {
 	if (m_testOverlay) {
 		return;
@@ -1242,13 +1299,13 @@ void Window::ensureTestOverlay() {
 			break;
 		case 1:
 			if (m_controller) {
-				m_controller->saveState(1);
+				m_controller->saveState(m_quickStateSlot);
 			}
 			hideTestOverlay();
 			break;
 		case 2:
 			if (m_controller) {
-				m_controller->loadState(1);
+				m_controller->loadState(m_quickStateSlot);
 			}
 			hideTestOverlay();
 			break;
@@ -1260,6 +1317,44 @@ void Window::ensureTestOverlay() {
 			hideTestOverlay();
 			openSettingsWindow();
 			break;
+        case 6: {
+            if (!m_controller) break;
+            QStringList slotChoices;
+            for (int slot = 1; slot <= 9; ++slot) slotChoices << quickSlotSummary(m_controller.get(), slot);
+            QInputDialog chooser(m_testOverlay);
+            chooser.setWindowTitle(tr("Save Slot"));
+            chooser.setLabelText(tr("Choose a slot. Saving replaces its current state:"));
+            chooser.setComboBoxItems(slotChoices);
+            chooser.setComboBoxEditable(false);
+            chooser.setTextValue(slotChoices.at(m_quickStateSlot - 1));
+            chooser.setProperty("gbaxSaveSlotChooser", true);
+            if (chooser.exec() == QDialog::Accepted) {
+                const int slot = slotChoices.indexOf(chooser.textValue()) + 1;
+                if (slot < 1) break;
+                m_quickStateSlot = slot;
+                auto* menu = static_cast<QuickMenuOverlayDialog*>(m_testOverlay);
+                menu->setActionText(1, tr("Save State — Slot %1").arg(slot));
+                menu->setActionText(2, tr("Load State — Slot %1").arg(slot));
+            }
+            break;
+        }
+        case 7: {
+            if (!m_controller) break;
+            const QFileInfo save(m_controller->savePath());
+            const QString modified = save.exists() ? QLocale().toString(save.lastModified(), QLocale::ShortFormat) : tr("No save file yet");
+            QMessageBox box(QMessageBox::Information, tr("Save Information"),
+                tr("In-game save location:\n%1\n\nFile last modified: %2\nLast successful state action this session: %3\n\nUse the game's own Save command for normal progress. File time is not proof that a particular in-game action was saved. Export a backup before moving files or changing versions.")
+                .arg(save.filePath(), modified, m_lastStateAction.isEmpty() ? tr("None yet") : m_lastStateAction), QMessageBox::Close, m_testOverlay);
+            auto* open = box.addButton(tr("Open Save Folder"), QMessageBox::ActionRole);
+            open->setEnabled(!m_controller->savePath().isEmpty());
+            box.exec();
+            if (box.clickedButton() == open) QDesktopServices::openUrl(QUrl::fromLocalFile(save.absolutePath()));
+            break;
+        }
+        case 8:
+            QApplication::clipboard()->setText(gbaxDiagnostics(m_config) + "\nConnected controllers: " + m_inputController.connectedGamepads().join(", ") + "\nDisplay: " + (m_display ? QString::fromLatin1(m_display->metaObject()->className()) : tr("Not active")) + "\nAudio: " + (m_audioProcessor ? QString::fromLatin1(m_audioProcessor->metaObject()->className()) : tr("Not active")));
+            QMessageBox::information(m_testOverlay, tr("Diagnostics Copied"), tr("Version, system, controller names and active backend information copied. ROM paths and saves are excluded. Review before sharing."));
+            break;
 		case 5:
 			hideTestOverlay();
 			toggleLauncherWindowFromController();
@@ -1304,7 +1399,9 @@ void Window::showTestOverlay() {
 	}
 	if (auto* overlay = static_cast<QuickMenuOverlayDialog*>(m_testOverlay)) {
 		overlay->setSubtitleText(gbaxQuickMenuSubtitleForWindow(this));
-	}
+        overlay->setActionText(1, tr("Save State — Slot %1").arg(m_quickStateSlot));
+        overlay->setActionText(2, tr("Load State — Slot %1").arg(m_quickStateSlot));
+    }
 	showMenu(false);
 	menuBar()->hide();
 	m_overlayWasPaused = m_controller && m_controller->isPaused();
@@ -3128,7 +3225,17 @@ void Window::setController(CoreController* controller, const QString& fname) {
 		reloadDisplayDriver();
 	}
 
-	m_controller = std::shared_ptr<CoreController>(controller);
+ m_controller = std::shared_ptr<CoreController>(controller);
+ m_lastStateAction.clear();
+ connect(controller, &CoreController::stateOperationFinished, this, [this, controller](bool saving, int slot, bool success) {
+  if (m_controller.get() != controller) return;
+  if (success) {
+   m_lastStateAction = tr("%1 slot %2 at %3").arg(saving ? tr("Saved") : tr("Loaded")).arg(slot).arg(QLocale().toString(QDateTime::currentDateTime(), QLocale::ShortFormat));
+   emit m_controller->statusPosted(m_lastStateAction);
+  } else {
+   QMessageBox::warning(this, tr("State Operation Failed"), tr("Could not %1 state slot %2. Check that the slot exists, the game revision matches, and the save folder is writable.").arg(saving ? tr("save") : tr("load")).arg(slot));
+  }
+ }, Qt::QueuedConnection);
 	m_controller->setInputController(&m_inputController);
 	m_controller->setLogger(&m_log);
 

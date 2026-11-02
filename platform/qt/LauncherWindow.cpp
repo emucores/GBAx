@@ -1,4 +1,7 @@
 #include "LauncherStyle.h"
+#include "LauncherData.h"
+#include "Diagnostics.h"
+#include <QInputDialog>
 #include <QStyledItemDelegate>
 #include <QStandardPaths>
 /* Copyright (c) 2026 GBAx contributors
@@ -1197,7 +1200,7 @@ LauncherWindow::LauncherWindow(ConfigController* config, QWidget* parent, QNetwo
 
 		QString latestStatePath;
 		QDateTime latestStateTime;
-		for (int slot = 1; slot <= qMax(4, m_saveStateButtons.size()); ++slot) {
+		for (int slot = 1; slot <= 9; ++slot) {
 			const QString statePath = savestatePathForRomSlot(resumePath, slot);
 			const QFileInfo stateInfo(statePath);
 			if (!statePath.isEmpty() && stateInfo.exists()) {
@@ -1577,10 +1580,10 @@ LauncherWindow::LauncherWindow(ConfigController* config, QWidget* parent, QNetwo
 	});
 	sc->addWidget(m_launchFullscreenCheck);
 
-	auto* appearanceSection = new QLabel(tr("Appearance"), settingsCard);
+	auto* appearanceSection = new QLabel(tr("Launcher Appearance"), settingsCard);
 	appearanceSection->setObjectName("sectionTitle");
 	sc->addWidget(appearanceSection);
-	auto* appearanceInfo = new QLabel(tr("Choose an accent theme for GBAx and enable Performance Mode on lower-end systems."), settingsCard);
+	auto* appearanceInfo = new QLabel(tr("Choose the launcher accent colour. Performance Mode reduces blur and backdrop effects in the library; it does not alter game emulation or repair compatibility issues."), settingsCard);
 	appearanceInfo->setObjectName("mutedText");
 	appearanceInfo->setWordWrap(true);
 	sc->addWidget(appearanceInfo);
@@ -1755,6 +1758,15 @@ LauncherWindow::LauncherWindow(ConfigController* config, QWidget* parent, QNetwo
 		QDesktopServices::openUrl(QUrl(QStringLiteral("https://github.com/emucores/GBAx/issues")));
 	});
 	troubleButtonsLayout->addWidget(m_reportBugSettingsButton, 0, Qt::AlignLeft);
+ auto* locateMissing = makeSecondaryButton(tr("Locate Missing Game…"));
+ connect(locateMissing, &QPushButton::clicked, this, &LauncherWindow::locateMissingGame);
+ troubleButtonsLayout->addWidget(locateMissing, 0, Qt::AlignLeft);
+ auto* diagnostics = makeSecondaryButton(tr("Copy Diagnostic Information"));
+ connect(diagnostics, &QPushButton::clicked, this, [this]() {
+  QApplication::clipboard()->setText(gbaxDiagnostics(m_config));
+  QMessageBox::information(this, tr("Diagnostics Copied"), tr("Version, platform and configured backend information copied. ROM paths, save contents and personal settings are excluded."));
+ });
+ troubleButtonsLayout->addWidget(diagnostics, 0, Qt::AlignLeft);
 	sc->addLayout(troubleButtonsLayout);
 
 	settingsScrollLayout->addWidget(settingsCard);
@@ -3353,7 +3365,6 @@ QString LauncherWindow::savestatePathForRomSlot(const QString& romPath, int slot
 	}
 	const QFileInfo romInfo(romPath);
 	QStringList dirCandidates;
-	dirCandidates << romInfo.absolutePath();
 	if (m_config) {
 		const QString configured = m_config->getOption("savestatePath");
 		if (!configured.isEmpty()) {
@@ -3366,6 +3377,7 @@ QString LauncherWindow::savestatePathForRomSlot(const QString& romPath, int slot
 			}
 		}
 	}
+	dirCandidates << romInfo.absolutePath();
 	dirCandidates.removeDuplicates();
 	const QString fileName = romInfo.completeBaseName() + QStringLiteral(".ss%1").arg(slot);
 	for (const QString& dirPath : dirCandidates) {
@@ -4506,14 +4518,11 @@ void LauncherWindow::saveMetadataForPath(const QString& path, const QVariantMap&
 	}
 	const QString target = managedMetadataPathForRom(path);
 	QDir().mkpath(QFileInfo(target).absolutePath());
-	QFile file(target);
-	if (!file.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
-		QMessageBox::warning(this, tr("Metadata not saved"), tr("GBAx could not write the metadata file."));
-		return;
-	}
-	QJsonObject obj = QJsonObject::fromVariantMap(metadata);
-	file.write(QJsonDocument(obj).toJson(QJsonDocument::Indented));
-	file.close();
+ const QByteArray payload = QJsonDocument(QJsonObject::fromVariantMap(metadata)).toJson(QJsonDocument::Indented);
+ if (!writeLauncherData(target, payload)) {
+  QMessageBox::warning(this, tr("Metadata Not Saved"), tr("The metadata could not be saved. The previous file has been kept. Check available storage and folder permissions."));
+  return;
+ }
 	clearMetadataCache(path);
 }
 
@@ -4794,7 +4803,13 @@ void LauncherWindow::updateContinuePlaying() {
 				m_continueCover->setPixmap(cachedCoverPixmap(last, m_continueCover->size()));
 			}
 			if (m_resumeButton) {
-				m_resumeButton->setText(tr("Resume"));
+				QDateTime latest;
+                for (int slot = 1; slot <= 9; ++slot) {
+                    const QFileInfo state(savestatePathForRomSlot(last, slot));
+                    if (state.exists() && (!latest.isValid() || state.lastModified() > latest)) latest = state.lastModified();
+                }
+                m_resumeButton->setText(latest.isValid() ? tr("Continue From State") : tr("Start Game"));
+                m_resumeButton->setToolTip(latest.isValid() ? tr("Newest state: %1").arg(QLocale().toString(latest, QLocale::ShortFormat)) : tr("Boot the game normally and use its in-game Continue option."));
 			}
 		}
 		if (shouldAutoDownloadCovers()) {
@@ -5389,7 +5404,7 @@ void LauncherWindow::loadInstalledLinks() {
 	for (auto it = obj.constBegin(); it != obj.constEnd(); ++it) {
 		const QString rawPath = it.value().toString().trimmed();
 		const QString normPath = normalizedRomPath(rawPath);
-		if (it.key().trimmed().isEmpty() || normPath.isEmpty() || !QFileInfo::exists(normPath) || seenPaths.contains(normPath.toLower())) {
+		if (it.key().trimmed().isEmpty() || normPath.isEmpty() || seenPaths.contains(normPath.toLower())) {
 			sanitized = true;
 			continue;
 		}
@@ -5414,8 +5429,9 @@ void LauncherWindow::saveInstalledLinks() const {
 	QJsonObject obj;
 	for (auto it = m_catalogInstalledLinks.begin(); it != m_catalogInstalledLinks.end(); ++it) obj.insert(it.key(), it.value());
 	QDir().mkpath(QFileInfo(installedLinksPath()).absolutePath());
-	QFile file(installedLinksPath());
-	if (file.open(QIODevice::WriteOnly | QIODevice::Truncate)) file.write(QJsonDocument(obj).toJson(QJsonDocument::Indented));
+ if (!writeLauncherData(installedLinksPath(), QJsonDocument(obj).toJson(QJsonDocument::Indented))) {
+  QMessageBox::warning(const_cast<LauncherWindow*>(this), tr("Library Changes Not Saved"), tr("GBAx could not save library changes. The previous file has been kept. Check storage and permissions before closing the application."));
+ }
 }
 
 void LauncherWindow::loadHiddenInstalledPaths() {
@@ -5434,8 +5450,9 @@ void LauncherWindow::saveHiddenInstalledPaths() const {
 	QJsonArray arr;
 	for (const QString& p : m_hiddenInstalledPaths) arr.append(p);
 	QDir().mkpath(QFileInfo(hiddenInstalledPath()).absolutePath());
-	QFile file(hiddenInstalledPath());
-	if (file.open(QIODevice::WriteOnly | QIODevice::Truncate)) file.write(QJsonDocument(arr).toJson(QJsonDocument::Indented));
+ if (!writeLauncherData(hiddenInstalledPath(), QJsonDocument(arr).toJson(QJsonDocument::Indented))) {
+  QMessageBox::warning(const_cast<LauncherWindow*>(this), tr("Library Changes Not Saved"), tr("GBAx could not save library changes. The previous file has been kept. Check storage and permissions before closing the application."));
+ }
 }
 
 void LauncherWindow::removeCatalogLinksForPath(const QString& path) {
@@ -5710,4 +5727,46 @@ void LauncherWindow::addItemForPath(const QString& path) {
 	item->setToolTip(QDir::toNativeSeparators(path));
 	m_grid->addItem(item);
 
+}
+
+void LauncherWindow::locateMissingGame() {
+ if (!m_config || (m_gameProcess && m_gameProcess->state() != QProcess::NotRunning)) {
+  QMessageBox::information(this, tr("Close the Game First"), tr("Close the running game before repairing library links.")); return;
+ }
+ QStringList missing = m_favorites.values();
+ missing.append(m_config->getMRU(ConfigController::MRU::ROM));
+ missing.append(m_catalogInstalledLinks.values());
+ missing.removeDuplicates();
+ for (int i = missing.size() - 1; i >= 0; --i) if (QFileInfo::exists(missing[i])) missing.removeAt(i);
+ if (missing.isEmpty()) { QMessageBox::information(this, tr("No Missing Games"), tr("No missing games were found in favourites or recent history.")); return; }
+ bool ok = false;
+ const QString oldPath = QInputDialog::getItem(this, tr("Locate Missing Game"), tr("Choose the missing file:"), missing, 0, false, &ok);
+ if (!ok) return;
+ const QString newPath = QFileDialog::getOpenFileName(this, tr("Select the Same Game at Its New Location"), QString(), tr("Games (*.gba *.gb *.gbc *.zip *.7z)"));
+ if (newPath.isEmpty() || !QFileInfo(newPath).isFile()) return;
+ const QString normalized = QDir::toNativeSeparators(QFileInfo(newPath).absoluteFilePath());
+ if (QMessageBox::question(this, tr("Repair Library Link"), tr("Use this file for the missing game? Favourites, recent history and play statistics will follow it. Only choose the same game revision. Save files and save states stay in their existing locations; use Save Storage settings to access them."), QMessageBox::Yes | QMessageBox::No, QMessageBox::No) != QMessageBox::Yes) return;
+ const QString oldMetadata = managedMetadataPathForRom(oldPath);
+ const QString newMetadata = managedMetadataPathForRom(normalized);
+ if (oldMetadata != newMetadata && QFileInfo::exists(oldMetadata) && !QFileInfo::exists(newMetadata)) {
+  QFile file(oldMetadata);
+  if (!file.open(QIODevice::ReadOnly) || !writeLauncherData(newMetadata, file.readAll())) {
+   QMessageBox::warning(this, tr("Repair Stopped"), tr("The custom metadata could not be copied. No library links were changed.")); return;
+  }
+ }
+ // Keep repaired files discoverable even when the new location is outside the scanned folder.
+ QString title = bestCatalogTitleForFileName(normalized);
+ if (title.isEmpty()) title = QFileInfo(normalized).completeBaseName();
+ if (!m_catalogInstalledLinks.contains(title) || m_catalogInstalledLinks.value(title) == oldPath) m_catalogInstalledLinks.insert(title, normalized);
+ if (m_favorites.remove(oldPath)) { m_favorites.insert(normalized); saveFavorites(); }
+ auto recent = m_config->getMRU(ConfigController::MRU::ROM);
+ for (QString& path : recent) if (path == oldPath) path = normalized;
+ recent.removeDuplicates(); m_config->setMRU(recent, ConfigController::MRU::ROM);
+ for (const QString& field : {QStringLiteral("seconds"), QStringLiteral("launchCount"), QStringLiteral("lastPlayed")}) {
+  if (!m_config->getQtOption(launcherStatsKey(normalized) + "/" + field, "launcherPlayStats").isValid())
+   m_config->setQtOption(launcherStatsKey(normalized) + "/" + field, m_config->getQtOption(launcherStatsKey(oldPath) + "/" + field, "launcherPlayStats"), "launcherPlayStats");
+ }
+ for (auto it = m_catalogInstalledLinks.begin(); it != m_catalogInstalledLinks.end(); ++it) if (it.value() == oldPath) it.value() = normalized;
+ saveInstalledLinks(); m_config->write(); clearMetadataCache(); refreshLibrary(true);
+ QMessageBox::information(this, tr("Library Link Repaired"), tr("The library link has been updated. Original files were not deleted. Check your save location before continuing."));
 }

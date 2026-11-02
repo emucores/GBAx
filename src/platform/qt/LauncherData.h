@@ -6,9 +6,21 @@
 #include <QDir>
 #include <QFile>
 #include <QFileInfo>
+#include <QSaveFile>
 #include <QStringList>
 
 namespace QGBA {
+
+// Commit a complete replacement or retain the previous file. Never fall back to
+// truncating the destination when a temporary file cannot be created.
+inline bool writeLauncherData(const QString& path, const QByteArray& payload) {
+ if (path.isEmpty() || !QDir().mkpath(QFileInfo(path).absolutePath())) return false;
+ QSaveFile file(path);
+ file.setDirectWriteFallback(false);
+ if (!file.open(QIODevice::WriteOnly)) return false;
+ if (file.write(payload) != payload.size()) { file.cancelWriting(); return false; }
+ return file.commit();
+}
 
 // Portable configurations may share a directory with the executable, ROMs,
 // saves and user files. Never recursively delete that directory to reset.

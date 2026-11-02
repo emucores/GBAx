@@ -85,6 +85,7 @@ private slots:
 	void applyPendingSelectionChange();
 	void launchSelected();
 	void launchSelectedSaveSlot(int slot);
+	void locateMissingGame();
 	void launchPath(const QString& path);
 	void launchPath(const QString& path, const QString& savestatePath);
 	void toggleFavorite();

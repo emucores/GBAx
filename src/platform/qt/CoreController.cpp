@@ -661,7 +661,9 @@ void CoreController::loadState(int slot) {
 			controller->m_backupLoadState = VFileDevice::openMemory();
 		}
 		mCoreSaveStateNamed(context->core, controller->m_backupLoadState, controller->m_saveStateFlags);
-		if (mCoreLoadState(context->core, controller->m_stateSlot, controller->m_loadStateFlags)) {
+		const bool success = mCoreLoadState(context->core, controller->m_stateSlot, controller->m_loadStateFlags);
+		emit controller->stateOperationFinished(false, controller->m_stateSlot, success);
+		if (success) {
 			emit controller->frameAvailable();
 			emit controller->stateLoaded();
 		}
@@ -737,7 +739,8 @@ void CoreController::saveState(int slot) {
 			vf->read(vf, controller->m_backupSaveState.data(), controller->m_backupSaveState.size());
 			vf->close(vf);
 		}
-		mCoreSaveState(context->core, controller->m_stateSlot, controller->m_saveStateFlags);
+		const bool success = mCoreSaveState(context->core, controller->m_stateSlot, controller->m_saveStateFlags);
+		emit controller->stateOperationFinished(true, controller->m_stateSlot, success);
 	});
 }
 
@@ -1292,7 +1295,7 @@ void CoreController::updatePlayerSave() {
 			if (m_threadContext.core->dirs.save == m_threadContext.core->dirs.base) {
 				m_savePath = m_baseDirectory;
 			} else {
-				m_savePath = QString::fromUtf8(m_threadContext.core->opts.savegamePath);
+				m_savePath = QDir(ConfigController::configDir()).absoluteFilePath(QString::fromUtf8(m_threadContext.core->opts.savegamePath));
 			}
 			m_savePath += PATH_SEP + QString::fromUtf8(m_threadContext.core->dirs.baseName) + saveSuffix;
 		}
