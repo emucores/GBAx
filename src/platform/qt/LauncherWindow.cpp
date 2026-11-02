@@ -713,6 +713,25 @@ static QFont launcherGridTitleFont() {
 class LauncherGridDelegate final : public QStyledItemDelegate {
 public:
 	using QStyledItemDelegate::QStyledItemDelegate;
+	QSize sizeHint(const QStyleOptionViewItem& option, const QModelIndex&) const override {
+		const auto* grid = qobject_cast<const QListWidget*>(parent());
+		return grid ? grid->gridSize() : option.rect.size();
+	}
+	void paint(QPainter* painter, const QStyleOptionViewItem& option, const QModelIndex& index) const override {
+		QStyleOptionViewItem opt(option);
+		initStyleOption(&opt, index);
+		const auto* grid = qobject_cast<const QListWidget*>(parent());
+		const QSize cover = grid ? grid->iconSize() : opt.decorationSize;
+		const QRect imageRect(opt.rect.x() + (opt.rect.width() - cover.width()) / 2, opt.rect.y(), cover.width(), cover.height());
+		const QRect titleRect(opt.rect.x() + 5, imageRect.bottom() + 7, qMax(0, opt.rect.width() - 10), opt.fontMetrics.height() + 4);
+		painter->save();
+		painter->setClipRect(opt.rect);
+		opt.icon.paint(painter, imageRect, Qt::AlignCenter, QIcon::Normal);
+		painter->setFont(opt.font);
+		painter->setPen(QColor(243, 245, 255, 226));
+		painter->drawText(titleRect, Qt::AlignHCenter | Qt::AlignVCenter, opt.fontMetrics.elidedText(opt.text, Qt::ElideRight, titleRect.width()));
+		painter->restore();
+	}
 protected:
 	void initStyleOption(QStyleOptionViewItem* option, const QModelIndex& index) const override {
 		QStyledItemDelegate::initStyleOption(option, index);
@@ -1993,8 +2012,8 @@ QString LauncherWindow::artworkStatusForPath(const QString& path) const {
 	const QString id = !linked.isEmpty() ? catalogIdForTitle(linked) : (isCatalogEntry(path) ? path : normalizedRomPath(path));
 	if (m_coverDownloadsInFlight.contains(id)) return tr("Downloading");
 	if (m_coverDownloadCandidateMap.contains(id)) return tr("Queued");
-	if (m_config && m_config->getQtOption(launcherStatsKey(id), "launcherCoverRetry").toLongLong() > QDateTime::currentSecsSinceEpoch()) {
-		return m_config->getQtOption(launcherStatsKey(id), "launcherCoverRetryReason").toString() == QStringLiteral("notFound") ? tr("No cover found") : tr("Download failed");
+	if (m_config && m_config->getQtOption(launcherStatsKey(id), "launcherCoverRetryV2").toLongLong() > QDateTime::currentSecsSinceEpoch()) {
+		return m_config->getQtOption(launcherStatsKey(id), "launcherCoverRetryReasonV2").toString() == QStringLiteral("notFound") ? tr("No cover found") : tr("Download failed");
 	}
 	if (m_autoArtworkPaused) return tr("Paused");
 	return shouldAutoDownloadCovers() || m_bulkCoverDownloadRequested ? tr("Queued") : tr("No artwork");
@@ -2112,18 +2131,7 @@ void LauncherWindow::ensureArtworkIndex(const QString& system) {
 		cached->deleteLater();
 		if (generation != m_downloadGeneration) return;
 		if (!data.isEmpty() || !m_artworkNetwork) { parseArtworkIndex(system, data, generation); return; }
-		QNetworkRequest request(QUrl(QStringLiteral("https://thumbnails.libretro.com/%1/Named_Boxarts/").arg(libretroSystemPath(system))));
-		QNetworkReply* reply = m_artworkNetwork->get(request);
-		m_coverReplies.insert(reply);
-		QTimer::singleShot(8000, reply, [reply]() { if (!reply->isFinished()) reply->abort(); });
-		connect(reply, &QNetworkReply::downloadProgress, this, [reply](qint64 received, qint64 total) { if (received > 4 * 1024 * 1024 || total > 4 * 1024 * 1024) reply->abort(); });
-		connect(reply, &QNetworkReply::finished, this, [this, reply, system, generation]() {
-			m_coverReplies.remove(reply);
-			const bool ok = reply->error() == QNetworkReply::NoError && reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt() == 200;
-			const QByteArray data = ok ? reply->read(4 * 1024 * 1024 + 1) : QByteArray();
-			reply->deleteLater();
-			if (generation == m_downloadGeneration) parseArtworkIndex(system, data.size() <= 4 * 1024 * 1024 ? data : QByteArray(), generation);
-		});
+		fetchArtworkIndex(system, generation, false);
 	});
 	cached->setFuture(QtConcurrent::run(&m_artworkWorkers, [cache]() {
 		const QFileInfo info(cache);
@@ -2131,6 +2139,41 @@ void LauncherWindow::ensureArtworkIndex(const QString& system) {
 		QFile file(cache);
 		return file.open(QIODevice::ReadOnly) ? file.readAll() : QByteArray();
 	}));
+}
+
+void LauncherWindow::fetchArtworkIndex(const QString& system, quint64 generation, bool fallback) {
+	if (generation != m_downloadGeneration || !m_artworkNetwork) return;
+	const QString url = fallback
+		? QStringLiteral("https://thumbnails.libretro.com/%1/Named_Boxarts/").arg(libretroSystemPath(system))
+		: QStringLiteral("https://api.github.com/repos/libretro-thumbnails/%1/git/trees/master?recursive=1").arg(system);
+	QNetworkRequest request{QUrl(url)};
+	request.setHeader(QNetworkRequest::UserAgentHeader, QStringLiteral("GBAx/2.0 artwork"));
+	QNetworkReply* reply = m_artworkNetwork->get(request);
+	m_coverReplies.insert(reply);
+	QTimer::singleShot(30000, reply, [reply]() { if (!reply->isFinished()) reply->abort(); });
+	connect(reply, &QNetworkReply::downloadProgress, this, [reply](qint64 received, qint64 total) { if (received > 12 * 1024 * 1024 || total > 12 * 1024 * 1024) reply->abort(); });
+	connect(reply, &QNetworkReply::finished, this, [this, reply, system, generation, fallback]() {
+		m_coverReplies.remove(reply);
+		const bool ok = reply->error() == QNetworkReply::NoError && reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt() == 200;
+		QByteArray data = ok ? reply->read(12 * 1024 * 1024 + 1) : QByteArray();
+		reply->deleteLater();
+		if (generation != m_downloadGeneration) return;
+		if (data.size() > 12 * 1024 * 1024) data.clear();
+		if (!fallback) {
+			const QJsonObject tree = QJsonDocument::fromJson(data).object();
+			QByteArray listing;
+			if (!tree.value("truncated").toBool()) {
+				for (const auto& entry : tree.value("tree").toArray()) {
+					const QString path = entry.toObject().value("path").toString();
+					if (path.startsWith("Named_Boxarts/") && path.endsWith(".png", Qt::CaseInsensitive))
+						listing += "<a href=\"" + QUrl::toPercentEncoding(path.mid(14)) + "\"></a>\n";
+				}
+			}
+			data = listing;
+			if (data.isEmpty()) { fetchArtworkIndex(system, generation, true); return; }
+		}
+		parseArtworkIndex(system, data, generation);
+	});
 }
 
 void LauncherWindow::parseArtworkIndex(const QString& system, const QByteArray& data, quint64 generation) {
@@ -2258,8 +2301,8 @@ void LauncherWindow::finishCoverDownloadJob(const QString& id, bool success, boo
 	++m_coverDownloadCompletedCount;
 	if (!success) ++m_coverDownloadFailedCount;
 	if (m_config) {
-		m_config->setQtOption(launcherStatsKey(id), success ? qint64(0) : QDateTime::currentSecsSinceEpoch() + retrySeconds, "launcherCoverRetry");
-		m_config->setQtOption(launcherStatsKey(id), success ? QString() : (retrySeconds == 86400 ? QStringLiteral("notFound") : QStringLiteral("network")), "launcherCoverRetryReason");
+		m_config->setQtOption(launcherStatsKey(id), success ? qint64(0) : QDateTime::currentSecsSinceEpoch() + retrySeconds, "launcherCoverRetryV2");
+		m_config->setQtOption(launcherStatsKey(id), success ? QString() : (retrySeconds == 86400 ? QStringLiteral("notFound") : QStringLiteral("network")), "launcherCoverRetryReasonV2");
 	}
 	queueCoverUiRefresh(id);
 	if (!success && manual) QMessageBox::information(this, tr("Cover unavailable"), tr("No cover could be downloaded. You can try again later or use Change Cover to choose an image."));
@@ -2566,7 +2609,9 @@ bool LauncherWindow::eventFilter(QObject* watched, QEvent* event) {
 	}
 
 	if (m_grid && watched == m_grid->viewport()) {
-		if (event->type() == QEvent::Leave) {
+		if (event->type() == QEvent::Resize) {
+			if (m_resizeDebounceTimer) m_resizeDebounceTimer->start();
+		} else if (event->type() == QEvent::Leave) {
 			setHoveredItem(nullptr);
 		} else if (event->type() == QEvent::MouseMove) {
 			auto* me = static_cast<QMouseEvent*>(event);
@@ -4695,11 +4740,12 @@ void LauncherWindow::updateResponsiveGridMetrics() {
 	const int cellWidth = qBound(110, width / columns, 206);
 	const int coverWidth = cellWidth - 14;
 	const QSize iconSize(coverWidth, qRound(coverWidth * kGbaCoverAspect));
-	const QSize cellSize(cellWidth, iconSize.height() + 38);
+	const QSize cellSize(cellWidth, iconSize.height() + QFontMetrics(launcherGridTitleFont()).height() + 22);
 	if (m_grid->iconSize() == iconSize && m_grid->gridSize() == cellSize) return;
 	m_grid->setSpacing(0); // The cell includes its own gap; do not double-count spacing.
 	m_grid->setIconSize(iconSize);
 	m_grid->setGridSize(cellSize);
+	m_grid->doItemsLayout();
 	m_thumbnailPreloadIndex = 0;
 	for (int i = 0; i < m_grid->count(); ++i) m_grid->item(i)->setData(Qt::UserRole + 1, false);
 	scheduleVisibleCoverRefresh();
@@ -5187,7 +5233,7 @@ void LauncherWindow::queueAutoCoverDownloadForPath(const QString& path, bool man
 	const QString linked = bestCatalogTitleForInstalledPath(norm);
 	if (!linked.isEmpty()) { queueAutoCoverDownloadForCatalogTitle(linked, manual); return; }
 	if (m_coverDownloadsInFlight.contains(norm) || m_coverDownloadCandidateMap.contains(norm)) return;
-	if (!manual && (m_coverAutoTried.contains(norm) || (m_config && m_config->getQtOption(launcherStatsKey(norm), "launcherCoverRetry").toLongLong() > QDateTime::currentSecsSinceEpoch()))) return;
+	if (!manual && (m_coverAutoTried.contains(norm) || (m_config && m_config->getQtOption(launcherStatsKey(norm), "launcherCoverRetryV2").toLongLong() > QDateTime::currentSecsSinceEpoch()))) return;
 	const QFileInfo info(norm);
 	QStringList names = launcherArtworkSearchTerms(info, normalizeTitle(info.fileName()), metadataForPath(norm));
 	if (names.isEmpty()) return;
@@ -5200,23 +5246,32 @@ void LauncherWindow::queueAutoCoverDownloadForPath(const QString& path, bool man
 	pumpCoverDownloadQueue();
 }
 
-void LauncherWindow::startCoverDownloadAttempt(const QString& path, const QStringList& candidates, int index, bool manual) {
+void LauncherWindow::startCoverDownloadAttempt(const QString& path, const QStringList& candidates, int index, bool manual, bool fallback) {
 	if (!m_artworkNetwork) { finishCoverDownloadJob(path, false, manual); return; }
 	if (index >= candidates.size()) { finishCoverDownloadJob(path, false, manual, 86400); return; }
-	if (QDateTime::currentMSecsSinceEpoch() - m_coverDownloadStarted.value(path) > 20000) { finishCoverDownloadJob(path, false, manual); return; }
+	if (QDateTime::currentMSecsSinceEpoch() - m_coverDownloadStarted.value(path) > 45000) { finishCoverDownloadJob(path, false, manual); return; }
 	const QString encoded = QString::fromUtf8(QUrl::toPercentEncoding(candidates.at(index)));
-	QNetworkRequest request(QUrl(QStringLiteral("https://thumbnails.libretro.com/%1/Named_Boxarts/%2.png").arg(libretroSystemPath(systemFolderNameForRom(path)), encoded)));
+	const QString system = systemFolderNameForRom(path);
+	const QString url = fallback
+		? QStringLiteral("https://thumbnails.libretro.com/%1/Named_Boxarts/%2.png").arg(libretroSystemPath(system), encoded)
+		: QStringLiteral("https://raw.githubusercontent.com/libretro-thumbnails/%1/master/Named_Boxarts/%2.png").arg(system, encoded);
+	QNetworkRequest request{QUrl(url)};
+	const quint64 requestGeneration = m_downloadGeneration;
 	request.setHeader(QNetworkRequest::UserAgentHeader, QStringLiteral("GBAx/2.0 artwork"));
 	QNetworkReply* reply = m_artworkNetwork->get(request);
 	m_coverReplies.insert(reply);
 	QTimer::singleShot(8000, reply, [reply]() { if (!reply->isFinished()) reply->abort(); });
 	connect(reply, &QNetworkReply::downloadProgress, this, [reply](qint64 received, qint64 total) { if (received > 8 * 1024 * 1024 || total > 8 * 1024 * 1024) reply->abort(); });
-	connect(reply, &QNetworkReply::finished, this, [this, reply, path, candidates, index, manual]() {
+	connect(reply, &QNetworkReply::finished, this, [this, reply, path, candidates, index, manual, fallback, requestGeneration]() {
 		m_coverReplies.remove(reply);
 		const int status = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
 		const bool ok = reply->error() == QNetworkReply::NoError;
 		const QByteArray data = reply->read(8 * 1024 * 1024 + 1);
 		reply->deleteLater();
+		if (requestGeneration != m_downloadGeneration || !m_coverDownloadsInFlight.contains(path)) return;
+		if ((!ok || status != 200 || data.isEmpty()) && !fallback) {
+			startCoverDownloadAttempt(path, candidates, index, manual, true); return;
+		}
 		if (status == 404) { startCoverDownloadAttempt(path, candidates, index + 1, manual); return; }
 		// A disconnected service or rate limit will not improve with another filename.
 		if (!ok || status != 200 || data.isEmpty() || data.size() > 8 * 1024 * 1024) { finishCoverDownloadJob(path, false, manual); return; }
@@ -5380,7 +5435,7 @@ void LauncherWindow::queueAutoCoverDownloadForCatalogTitle(const QString& title,
 	const QString id = catalogIdForTitle(title);
 	if (!findCoverArtPath(id).isEmpty() || m_coverDownloadsInFlight.contains(id) || m_coverDownloadCandidateMap.contains(id)) return;
 	if (!manual && !shouldAutoDownloadCovers() && !m_bulkCoverDownloadRequested) return;
-	if (!manual && !m_bulkCoverDownloadRequested && (m_coverAutoTried.contains(id) || (m_config && m_config->getQtOption(launcherStatsKey(id), "launcherCoverRetry").toLongLong() > QDateTime::currentSecsSinceEpoch()))) return;
+	if (!manual && !m_bulkCoverDownloadRequested && (m_coverAutoTried.contains(id) || (m_config && m_config->getQtOption(launcherStatsKey(id), "launcherCoverRetryV2").toLongLong() > QDateTime::currentSecsSinceEpoch()))) return;
 	const QStringList candidates = catalogCoverCandidates(title);
 	if (candidates.isEmpty()) return;
 	m_coverAutoTried.insert(id);
@@ -5724,7 +5779,7 @@ void LauncherWindow::addItemForPath(const QString& path) {
 	item->setTextAlignment(Qt::AlignHCenter);
 	item->setData(Qt::UserRole, path);
 	item->setData(Qt::UserRole + 1, false);
-	item->setToolTip(QDir::toNativeSeparators(path));
+	item->setToolTip(title + "\n" + QDir::toNativeSeparators(path));
 	m_grid->addItem(item);
 
 }

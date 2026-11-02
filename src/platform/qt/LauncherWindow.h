@@ -162,7 +162,7 @@ private:
 	bool tryDownloadLibretroCover(const QString& path, QString* savedPathOut = nullptr);
 	void queueAutoCoverDownloadForPath(const QString& path, bool manual = false);
 	void queueAutoCoverDownloadForCatalogTitle(const QString& title, bool manual = false);
-	void startCoverDownloadAttempt(const QString& path, const QStringList& candidates, int index, bool manual);
+	void startCoverDownloadAttempt(const QString& path, const QStringList& candidates, int index, bool manual, bool fallback = false);
 	void loadCoverDownloadPreference();
 	void saveCoverDownloadPreference() const;
 	bool shouldAutoDownloadCovers() const;
@@ -182,6 +182,7 @@ private:
 	void refreshArtworkWidgets(const QString& id);
 	void cancelArtworkDownloads();
 	void ensureArtworkIndex(const QString& system);
+	void fetchArtworkIndex(const QString& system, quint64 generation, bool fallback);
 	void parseArtworkIndex(const QString& system, const QByteArray& data, quint64 generation);
 	void queueCoverUiRefresh(const QString& id);
 	void flushPendingCoverUiRefreshes();

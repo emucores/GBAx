@@ -9,7 +9,7 @@
 #include <QStringList>
 namespace QGBA {
 inline QString gbaxDiagnostics(ConfigController* config) {
- QStringList lines{QStringLiteral("GBAx 2.0.0 Preview 2"), QString("Build: %1 (%2)").arg(QString::fromUtf8(projectVersion), QString::fromUtf8(gitCommit)), QString("OS: %1").arg(QSysInfo::prettyProductName()), QString("Architecture: %1").arg(QSysInfo::currentCpuArchitecture()), QString("Qt: %1; window system: %2").arg(qVersion(), QGuiApplication::platformName())};
+ QStringList lines{QStringLiteral("GBAx 2.0.0 Preview 3"), QString("Build: %1 (%2)").arg(QString::fromUtf8(projectVersion), QString::fromUtf8(gitCommit)), QString("OS: %1").arg(QSysInfo::prettyProductName()), QString("Architecture: %1").arg(QSysInfo::currentCpuArchitecture()), QString("Qt: %1; window system: %2").arg(qVersion(), QGuiApplication::platformName())};
  if (config) {
   for (const QString& key : {QStringLiteral("displayDriver"), QStringLiteral("audioDriver")}) {
    bool ok = false; int value = config->getQtOption(key).toInt(&ok);

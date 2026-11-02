@@ -16,6 +16,8 @@
 #include <gbax/internal/gba/input.h>
 
 #include <QDialog>
+#include <QStyleOptionViewItem>
+#include <QAbstractItemDelegate>
 #include <QInputDialog>
 #include <QComboBox>
 #include <QCheckBox>
@@ -86,13 +88,16 @@ public:
 	int delay = 40;
 	bool offline = false;
 	int imageStatus = 200;
+	bool githubUnavailable = false;
 	int active = 0, peak = 0;
 	QStringList requested;
 protected:
 	QNetworkReply* createRequest(Operation, const QNetworkRequest& request, QIODevice*) override {
 		requested.append(request.url().toString());
 		QByteArray payload;
-		if (request.url().path().endsWith('/')) {
+		if (request.url().host() == "api.github.com") {
+			payload = R"({"truncated":false,"tree":[{"path":"Named_Boxarts/007 - Everything or Nothing (USA).png"}]})";
+		} else if (request.url().path().endsWith('/')) {
 			payload = "<a href=\"007%20-%20Everything%20or%20Nothing%20%28USA%29.png\">cover</a>";
 		} else {
 			QImage image(120, 160, QImage::Format_RGB32);
@@ -101,7 +106,7 @@ protected:
 			buffer.open(QIODevice::WriteOnly);
 			image.save(&buffer, "PNG");
 		}
-		auto* reply = new ArtworkReply(request, payload, delay, offline, request.url().path().endsWith('/') ? 200 : imageStatus, this);
+		auto* reply = new ArtworkReply(request, payload, delay, offline, githubUnavailable && request.url().host().contains("github") ? 503 : (request.url().path().endsWith('/') || request.url().host() == "api.github.com" ? 200 : imageStatus), this);
 		++active;
 		peak = qMax(peak, active);
 		connect(reply, &QNetworkReply::finished, this, [this]() { --active; });
@@ -397,6 +402,38 @@ private slots:
 		QTRY_VERIFY(hasCover());
 		for (const QString& url : sharedCoverRequests) QCOMPARE(network.requested.count(url), 1); // Shared covers are not downloaded again when catalogue preloading starts.
 		launcherOwner.reset();
+		m_config->setQtOption("autoDownloadCovers", false, "gbaxLauncher");
+	}
+
+	void artworkFallsBackAndGridSurvivesResize() {
+		QTemporaryDir library;
+		QVERIFY(QFile::copy(m_rom, library.filePath("Fallback Fixture.gba")));
+		m_config->setOption("romDirectory", library.path());
+		m_config->setQtOption("autoDownloadCovers", true, "gbaxLauncher");
+		ArtworkNetwork network;
+		network.githubUnavailable = true;
+		LauncherWindow launcher(m_config, nullptr, &network);
+		launcher.show();
+		auto* grid = launcher.findChild<QListWidget*>("grid");
+		QTRY_COMPARE(grid->count(), 1);
+		auto hasCover = [grid]() {
+			const QImage image = grid->item(0)->icon().pixmap(grid->iconSize()).toImage();
+			return !image.isNull() && image.pixelColor(image.width()/2, image.height()/2).green() > 150;
+		};
+		QTRY_VERIFY_WITH_TIMEOUT(hasCover(), 5000);
+		QStringList hosts;
+		for (const QString& url : network.requested) if (QUrl(url).path().endsWith(".png")) hosts.append(QUrl(url).host());
+		QCOMPARE(hosts, QStringList({"raw.githubusercontent.com", "thumbnails.libretro.com"}));
+		for (const QSize size : {QSize(1246, 942), QSize(2048, 1105), QSize(1000, 740), QSize(2048, 1105)}) {
+			launcher.resize(size);
+			QTest::qWait(300);
+			QStyleOptionViewItem option;
+			option.initFrom(grid);
+			const QModelIndex index = grid->model()->index(0, 0);
+			QCOMPARE(grid->itemDelegate()->sizeHint(option, index), grid->gridSize());
+			QVERIFY(grid->gridSize().height() >= grid->iconSize().height() + grid->fontMetrics().height() + 16);
+			QVERIFY(hasCover());
+		}
 		m_config->setQtOption("autoDownloadCovers", false, "gbaxLauncher");
 	}
 
